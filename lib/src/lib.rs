@@ -17,6 +17,7 @@ mod avl_tree;
 mod backtracking;
 mod checker;
 mod data_structures;
+mod dense_set;
 mod inst_stream;
 mod linear_scan;
 mod trees_maps_sets;

@@ -22,8 +22,8 @@ use std::mem;
 use crate::analysis::{add_raw_reg_vecs_for_insn, run_analysis};
 use crate::avl_tree::{AVLTree, AVL_NULL};
 use crate::data_structures::*;
+use crate::dense_set::RegBitSet;
 use crate::inst_stream::{edit_inst_stream, InstToInsert, InstToInsertAndPoint};
-use crate::trees_maps_sets::SparseSet;
 use crate::{Function, RegAllocError, RegAllocResult};
 
 // Helpers for SmallVec
@@ -2499,7 +2499,7 @@ fn resolve_moves<F: Function>(
     intervals: &Intervals,
     virtual_intervals: &Vec<IntId>,
     fragments: &Fragments,
-    liveouts: &TypedIxVec<BlockIx, SparseSet<Reg>>,
+    liveouts: &TypedIxVec<BlockIx, RegBitSet>,
     spill_slot: &mut u32,
     scratches_by_rc: &[Option<RealReg>],
 ) -> Vec<InstToInsertAndPoint> {
