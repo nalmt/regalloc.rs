@@ -9,8 +9,8 @@ use log::{debug, info};
 use std::fmt;
 
 use crate::data_structures::{
-  BlockIx, InstIx, InstPoint, Map, Queue, RangeFrag, RangeFragIx,
-  RangeFragKind, RealRange, RealRangeIx, RealReg, RealRegUniverse, Reg,
+  BitSet, BlockIx, InstIx, InstPoint, Map, Queue, RangeFrag, RangeFragIx,
+  RangeFragKind, RealRange, RealRangeIx, RealReg, RealRegUniverse, Reg, RegSet,
   SanitizedInstRegUses, Set, SortedRangeFragIxs, SpillCost, TypedIxVec,
   VirtualRange, VirtualRangeIx,
 };
@@ -730,13 +730,13 @@ fn get_sanitized_reg_uses<F: Function>(
 #[inline(never)]
 fn calc_def_and_use<F: Function>(
   func: &F, san_reg_uses: &TypedIxVec<InstIx, SanitizedInstRegUses>,
-) -> (TypedIxVec<BlockIx, Set<Reg>>, TypedIxVec<BlockIx, Set<Reg>>) {
+) -> (TypedIxVec<BlockIx, BitSet>, TypedIxVec<BlockIx, BitSet>) {
   info!("    calc_def_and_use: begin");
   let mut def_sets = TypedIxVec::new();
   let mut use_sets = TypedIxVec::new();
   for b in func.blocks() {
-    let mut def = Set::empty();
-    let mut uce = Set::empty();
+    let mut def: BitSet = RegSet::empty();
+    let mut uce: BitSet = RegSet::empty();
     for iix in func.block_insns(b) {
       let sru = &san_reg_uses[iix];
       // Add to |uce|, any registers for which the first event
@@ -785,15 +785,15 @@ fn calc_def_and_use<F: Function>(
 // Returned vectors contain one element per block
 #[inline(never)]
 fn calc_livein_and_liveout<F: Function>(
-  func: &F, def_sets_per_block: &TypedIxVec<BlockIx, Set<Reg>>,
-  use_sets_per_block: &TypedIxVec<BlockIx, Set<Reg>>, cfg_info: &CFGInfo,
-) -> (TypedIxVec<BlockIx, Set<Reg>>, TypedIxVec<BlockIx, Set<Reg>>) {
+  func: &F, def_sets_per_block: &TypedIxVec<BlockIx, BitSet>,
+  use_sets_per_block: &TypedIxVec<BlockIx, BitSet>, cfg_info: &CFGInfo,
+) -> (TypedIxVec<BlockIx, BitSet>, TypedIxVec<BlockIx, BitSet>) {
   info!("    calc_livein_and_liveout: begin");
   let nBlocks = func.blocks().len() as u32;
-  let empty = Set::<Reg>::empty();
+  let empty: BitSet = RegSet::empty();
 
   let mut nEvals = 0;
-  let mut liveouts = TypedIxVec::<BlockIx, Set<Reg>>::new();
+  let mut liveouts = TypedIxVec::<BlockIx, BitSet>::new();
   liveouts.resize(nBlocks, empty.clone());
 
   // Initialise the work queue so as to do a reverse preorder traversal
@@ -819,7 +819,7 @@ fn calc_livein_and_liveout<F: Function>(
     inQ[i] = false;
 
     // Compute a new value for liveouts[bixI]
-    let mut set = Set::<Reg>::empty();
+    let mut set: BitSet = RegSet::empty();
     for bixJ in cfg_info.succ_map[bixI].iter() {
       let mut liveinJ = liveouts[*bixJ].clone();
       liveinJ.remove(&def_sets_per_block[*bixJ]);
@@ -847,7 +847,7 @@ fn calc_livein_and_liveout<F: Function>(
 
   // The liveout values are done, but we need to compute the liveins
   // too.
-  let mut liveins = TypedIxVec::<BlockIx, Set<Reg>>::new();
+  let mut liveins = TypedIxVec::<BlockIx, BitSet>::new();
   liveins.resize(nBlocks, empty.clone());
   for bixI in BlockIx::new(0).dotdot(BlockIx::new(nBlocks)) {
     let mut liveinI = liveouts[bixI].clone();
@@ -905,7 +905,7 @@ fn calc_livein_and_liveout<F: Function>(
 // Func |f| (duh!)
 #[inline(never)]
 fn get_RangeFrags_for_block<F: Function>(
-  func: &F, bix: BlockIx, livein: &Set<Reg>, liveout: &Set<Reg>,
+  func: &F, bix: BlockIx, livein: &BitSet, liveout: &BitSet,
   san_reg_uses: &TypedIxVec<InstIx, SanitizedInstRegUses>,
   outMap: &mut Map<Reg, Vec<RangeFragIx>>,
   outFEnv: &mut TypedIxVec<RangeFragIx, RangeFrag>,
@@ -1161,8 +1161,8 @@ fn get_RangeFrags_for_block<F: Function>(
 
 #[inline(never)]
 fn get_RangeFrags<F: Function>(
-  func: &F, livein_sets_per_block: &TypedIxVec<BlockIx, Set<Reg>>,
-  liveout_sets_per_block: &TypedIxVec<BlockIx, Set<Reg>>,
+  func: &F, livein_sets_per_block: &TypedIxVec<BlockIx, BitSet>,
+  liveout_sets_per_block: &TypedIxVec<BlockIx, BitSet>,
   san_reg_uses: &TypedIxVec<InstIx, SanitizedInstRegUses>,
 ) -> (Map<Reg, Vec<RangeFragIx>>, TypedIxVec<RangeFragIx, RangeFrag>) {
   info!("    get_RangeFrags: begin");
@@ -1773,7 +1773,7 @@ pub fn run_analysis<F: Function>(
     // The fragment table
     TypedIxVec<RangeFragIx, RangeFrag>,
     // Liveouts per block
-    TypedIxVec<BlockIx, Set<Reg>>,
+    TypedIxVec<BlockIx, BitSet>,
     // Estimated execution frequency per block
     TypedIxVec<BlockIx, u32>,
   ),
@@ -1838,7 +1838,7 @@ pub fn run_analysis<F: Function>(
 
   // Verify livein set of entry block against liveins specified by function
   // (e.g., ABI params).
-  let func_liveins = Set::from_vec(
+  let func_liveins = RegSet::from_vec(
     func
       .func_liveins()
       .to_vec()
@@ -1846,12 +1846,13 @@ pub fn run_analysis<F: Function>(
       .map(|rreg| rreg.to_reg())
       .collect(),
   );
+
   if !livein_sets_per_block[func.entry_block()].is_subset_of(&func_liveins) {
     return Err(AnalysisError::EntryLiveinValues);
   }
 
   // Add function liveouts to every block ending in a return.
-  let func_liveouts = Set::from_vec(
+  let func_liveouts = RegSet::from_vec(
     func
       .func_liveouts()
       .to_vec()

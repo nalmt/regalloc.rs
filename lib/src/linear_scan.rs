@@ -2426,7 +2426,7 @@ fn find_enclosing_interval(
 fn resolve_moves<F: Function>(
   func: &F, reg_uses: &RegUses, mention_map: &HashMap<Reg, MentionMap>,
   intervals: &Intervals, virtual_intervals: &Vec<IntId>, fragments: &Fragments,
-  liveouts: &TypedIxVec<BlockIx, Set<Reg>>, spill_slot: &mut u32,
+  liveouts: &TypedIxVec<BlockIx, BitSet>, spill_slot: &mut u32,
   scratches_by_rc: &[Option<RealReg>],
 ) -> InstsAndPoints {
   let mut memory_moves = HashMap::default();

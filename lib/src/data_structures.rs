@@ -9,14 +9,1270 @@ use rustc_hash::FxHashSet;
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
-use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::Index;
 use std::ops::IndexMut;
 use std::slice::{Iter, IterMut};
+use std::{cmp, fmt};
 
 use crate::interface::Function;
+
+//=============================================================================
+// RegSet
+
+const BLOCK_SIZE: usize = 64;
+
+pub struct BitSet {
+  data: Vec<u64>,
+  reg_vec: FxHashMap<usize, Reg>,
+}
+
+pub trait RegSet {
+  fn empty() -> Self;
+  /// Return a new BitSet with one item set.
+  fn unit(item: Reg) -> Self;
+  /// Return a new BitSet with two items set.
+  fn two(item1: Reg, item2: Reg) -> Self;
+  fn card(&self) -> usize;
+  /// Set the item to 1.
+  fn insert(&mut self, item: Reg);
+  /// If the item is set, clear the item to 0.
+  /// Do nothing otherwise.
+  fn delete(&mut self, item: Reg);
+  fn is_empty(&self) -> bool;
+  /// Toggle the item.
+  fn contains(&self, item: Reg) -> bool;
+  fn intersect(&mut self, other: &Self);
+  fn union(&mut self, other: &Self);
+  fn remove(&mut self, other: &Self);
+  fn intersects(&self, other: &Self) -> bool;
+  fn is_subset_of(&self, other: &Self) -> bool;
+  fn equals(&self, other: &Self) -> bool;
+  fn from_vec(vec: Vec<Reg>) -> Self;
+}
+
+impl RegSet for BitSet {
+  fn empty() -> Self {
+    let mut d = Vec::<u64>::new();
+    d.push(0);
+    Self { data: d, reg_vec: FxHashMap::default() }
+  }
+
+  fn unit(item: Reg) -> Self {
+    let mut s: BitSet = RegSet::empty();
+    s.insert(item);
+    s
+  }
+
+  fn two(item1: Reg, item2: Reg) -> Self {
+    let mut s: BitSet = RegSet::empty();
+    s.insert(item1);
+    s.insert(item2);
+    s
+  }
+
+  fn card(&self) -> usize {
+    let mut counter = 0;
+
+    for i in 0..self.data.len() {
+      counter += self.data[i].count_ones();
+    }
+    counter as usize
+  }
+
+  fn insert(&mut self, item: Reg) {
+    let reg_index;
+
+    if item.is_real() {
+      reg_index = item.get_index();
+    } else {
+      reg_index = 256+item.get_index();
+    }
+    self.reg_vec.insert(reg_index, item);
+
+    let data_index = reg_index / BLOCK_SIZE;
+    let offset = reg_index % BLOCK_SIZE;
+
+    while data_index >= self.data.len() {
+      self.data.push(0);
+    }
+    self.data[data_index] |= 1 << offset;
+  }
+
+  fn from_vec(vec: Vec<Reg>) -> Self {
+    let mut res: BitSet = RegSet::empty();
+    for x in vec {
+      res.insert(x);
+    }
+    res
+  }
+
+  fn delete(&mut self, item: Reg) {
+    let reg_index;
+
+    if item.is_real() {
+      reg_index = item.get_index();
+    } else {
+      reg_index = 256+item.get_index();
+    }
+
+    let data_index = reg_index / BLOCK_SIZE;
+    let offset = reg_index % BLOCK_SIZE;
+
+    self.reg_vec.remove(&reg_index);
+    self.data[data_index] &= !(1 << offset);
+  }
+
+  fn is_empty(&self) -> bool {
+    for i in 0..self.data.len() {
+      if self.data[i] != 0 {
+        return false;
+      }
+    }
+    true
+  }
+
+  fn contains(&self, item: Reg) -> bool {
+    let reg_index;
+
+    if item.is_real() {
+      reg_index = item.get_index();
+    } else {
+      reg_index = 256+item.get_index();
+    }
+
+    let data_index = reg_index / BLOCK_SIZE;
+    let offset = reg_index % BLOCK_SIZE;
+
+    if data_index >= self.data.len() {
+      false
+    } else {
+      (1 & (self.data[data_index] >> offset)) != 0
+    }
+  }
+
+  fn intersect(&mut self, other: &Self) {
+    let smallest_set_size = cmp::min(self.data.len(), other.data.len());
+
+    for i in 0..smallest_set_size {
+      self.data[i] &= other.data[i];
+    }
+
+    for i in smallest_set_size..self.data.len() {
+      self.data[i] = 0;
+    }
+
+    let mut res = FxHashMap::<usize, Reg>::default();
+    for (&key, &item) in self.reg_vec.iter() {
+      if other.reg_vec.contains_key(&key) {
+        res.insert(key, item);
+      }
+    }
+    self.reg_vec = res;
+
+  }
+
+  fn union(&mut self, other: &Self) {
+    let smallest_set_size = cmp::min(self.data.len(), other.data.len());
+    let greatest_set_size = cmp::max(self.data.len(), other.data.len());
+
+    for i in 0..smallest_set_size {
+      self.data[i] |= other.data[i];
+    }
+
+    if other.data.len() > self.data.len() {
+      for i in smallest_set_size..greatest_set_size {
+          self.data.push(other.data[i]);
+      }
+    }
+
+    for (&key, &item) in other.reg_vec.iter() {
+      if !self.reg_vec.contains_key(&key) {
+        self.reg_vec.insert(key, item);
+      }
+    }
+  }
+
+  fn remove(&mut self, other: &Self) {
+    let smallest_set_size = cmp::min(self.data.len(), other.data.len());
+
+    for i in 0..smallest_set_size {
+      self.data[i] &= !other.data[i];
+    }
+
+    for (&key, _) in other.reg_vec.iter() {
+      if self.reg_vec.contains_key(&key) {
+        self.reg_vec.remove(&key);
+      }
+    }
+
+  }
+
+  fn intersects(&self, other: &Self) -> bool {
+    let smallest_set_size = cmp::min(self.data.len(), other.data.len());
+
+    for i in 0..smallest_set_size {
+      if self.data[i] & other.data[i] != 0 {
+        return true;
+      }
+    }
+
+    false
+  }
+
+  fn is_subset_of(&self, other: &Self) -> bool {
+    let smallest_set_size = cmp::min(self.data.len(), other.data.len());
+
+    for i in 0..smallest_set_size {
+      if (self.data[i] | other.data[i]) != other.data[i] {
+        return false;
+      }
+    }
+
+    if self.data.len() > other.data.len() {
+      for i in other.data.len()..self.data.len() {
+        if self.data[i] != 0 {
+          return false;
+        }
+      }
+    }
+
+    true
+  }
+
+  fn equals(&self, other: &Self) -> bool {
+    self.data == other.data
+  }
+}
+
+impl fmt::Debug for BitSet {
+  fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+    write!(fmt, "{:?}", self.data)
+  }
+}
+
+impl Clone for BitSet {
+  fn clone(&self) -> Self {
+    BitSet { data: self.data.clone(), reg_vec: self.reg_vec.clone() }
+  }
+}
+
+pub struct BitSetIter<'set> {
+  set_iter: u64,
+  reg_set: &'set BitSet,
+  index: usize,
+}
+impl BitSet {
+  pub fn iter(&self) -> BitSetIter {
+    BitSetIter { set_iter: self.data[0], reg_set: self, index: 0 }
+  }
+}
+impl<'set> Iterator for BitSetIter<'set> {
+  type Item = &'set Reg;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    while self.set_iter == 0 && self.index + 1 < self.reg_set.data.len() {
+      self.index += 1;
+      self.set_iter = self.reg_set.data[self.index];
+    }
+
+    if self.set_iter == 0 {
+      None
+    } else {
+      let reg_index =
+        self.set_iter.trailing_zeros() as usize + BLOCK_SIZE * self.index;
+
+      // Set the register that have been read to 0.
+      self.set_iter &= !(1 << self.set_iter.trailing_zeros());
+
+        self.reg_set.reg_vec.get(&reg_index)
+    }
+  }
+}
+
+#[test]
+fn real_and_virtual() {
+  let virtual_reg8 = Reg::new_virtual(RegClass::F64, 8);
+  let real_reg8 = Reg::new_real(RegClass::F64, 0, 8);
+
+  let mut a: BitSet = RegSet::empty();
+
+  a.insert(virtual_reg8);
+  a.insert(real_reg8);
+
+  assert_eq!(a.reg_vec.len(), 2);
+}
+#[test]
+fn from_vec() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg128 = Reg::new_real(RegClass::F64, 0, 128);
+
+  let mut a = Vec::<Reg>::new();
+
+  a.push(reg8);
+  a.push(reg10);
+  a.push(reg62);
+  a.push(reg63);
+  a.push(reg64);
+  a.push(reg128);
+
+  let b: BitSet = RegSet::from_vec(a);
+  assert_eq!(b.data[0], 0xC000000000000500);
+  assert_eq!(b.data[1], 1);
+  assert_eq!(b.data[2], 1);
+}
+#[test]
+fn is_empty() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+
+  let mut a: BitSet = RegSet::empty();
+  assert_eq!(a.is_empty(), true);
+
+  a.insert(reg8);
+  assert_eq!(a.is_empty(), false);
+
+  a.delete(reg8);
+  assert_eq!(a.is_empty(), true);
+
+  a.insert(reg64);
+  assert_eq!(a.is_empty(), false);
+
+  a.delete(reg64);
+  assert_eq!(a.is_empty(), true);
+}
+
+#[test]
+fn unit() {
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let a: BitSet = RegSet::unit(reg63);
+  assert_eq!(a.data[0], 0x8000000000000000);
+}
+
+#[test]
+fn two() {
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let a: BitSet = RegSet::two(reg63, reg64);
+
+  assert_eq!(a.data[0], 0x8000000000000000);
+  assert_eq!(a.data[1], 1);
+}
+
+#[test]
+fn card() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg128 = Reg::new_real(RegClass::F64, 0, 128);
+
+  let mut a: BitSet = RegSet::empty();
+  assert_eq!(a.card(), 0);
+
+  a.insert(reg8);
+  assert_eq!(a.card(), 1);
+
+  a.insert(reg10);
+  assert_eq!(a.card(), 2);
+
+  a.insert(reg62);
+  assert_eq!(a.card(), 3);
+
+  a.insert(reg63);
+  assert_eq!(a.card(), 4);
+
+  a.insert(reg64);
+  assert_eq!(a.card(), 5);
+
+  a.insert(reg128);
+  assert_eq!(a.card(), 6);
+
+  a.delete(reg8);
+  assert_eq!(a.card(), 5);
+
+  a.delete(reg10);
+  assert_eq!(a.card(), 4);
+
+  a.delete(reg62);
+  assert_eq!(a.card(), 3);
+
+  a.delete(reg63);
+  assert_eq!(a.card(), 2);
+
+  a.delete(reg64);
+  assert_eq!(a.card(), 1);
+
+  a.delete(reg128);
+  assert_eq!(a.card(), 0);
+}
+
+#[test]
+fn insert() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+
+  let mut a: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  assert_eq!(a.data[0], 0x100);
+
+  a.insert(reg10);
+  assert_eq!(a.data[0], 0x500);
+
+  a.insert(reg62);
+  assert_eq!(a.data[0], 0x4000000000000500);
+
+  a.insert(reg63);
+  assert_eq!(a.data[0], 0xC000000000000500);
+
+  a.insert(reg64);
+  assert_eq!(a.data[1], 1);
+
+  // It's ok to insert twice a register.
+  a.insert(reg64);
+  assert_eq!(a.data[1], 1);
+}
+
+#[test]
+fn delete() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+
+  let mut a: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  assert_eq!(a.data[0], 0x100);
+
+  a.insert(reg10);
+  assert_eq!(a.data[0], 0x500);
+
+  a.insert(reg62);
+
+  assert_eq!(a.data[0], 0x4000000000000500);
+
+  a.delete(reg8);
+  assert_eq!(a.data[0], 0x4000000000000400);
+
+  a.delete(reg62);
+  assert_eq!(a.data[0], 0x400);
+
+  a.delete(reg10);
+  assert_eq!(a.data[0], 0);
+  assert_eq!(a.is_empty(), true);
+
+  a.insert(reg64);
+  assert_eq!(a.is_empty(), false);
+  assert_eq!(a.data[1], 1);
+
+  a.delete(reg64);
+  assert_eq!(a.data[1], 0);
+  assert_eq!(a.is_empty(), true);
+
+  // It's ok to delete twice a register.
+  a.delete(reg64);
+  assert_eq!(a.data[1], 0);
+  assert_eq!(a.is_empty(), true);
+}
+
+#[test]
+fn contains() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+
+  let mut a: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  assert_eq!(a.contains(reg8), true);
+
+  a.insert(reg10);
+  assert_eq!(a.contains(reg10), true);
+
+  a.insert(reg62);
+  assert_eq!(a.contains(reg62), true);
+
+  a.delete(reg8);
+  assert_eq!(a.contains(reg8), false);
+
+  a.delete(reg62);
+  assert_eq!(a.contains(reg62), false);
+
+  a.delete(reg10);
+  assert_eq!(a.contains(reg10), false);
+
+  a.insert(reg64);
+  assert_eq!(a.contains(reg64), true);
+
+  a.delete(reg64);
+  assert_eq!(a.contains(reg64), false);
+}
+
+#[test]
+fn intersect() {
+  let reg0 = Reg::new_real(RegClass::F64, 0, 0);
+  let reg1 = Reg::new_real(RegClass::F64, 0, 1);
+  let reg2 = Reg::new_real(RegClass::F64, 0, 2);
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg66 = Reg::new_real(RegClass::F64, 0, 66);
+  let reg128 = Reg::new_real(RegClass::F64, 0, 128);
+
+  let mut a: BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+  let mut c: BitSet = RegSet::empty();
+  let mut d: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  assert_eq!(a.contains(reg8), true);
+  a.intersect(&b);
+  assert_eq!(a.contains(reg8), false);
+
+  a.insert(reg10);
+  b.insert(reg10);
+
+  a.insert(reg62);
+  b.insert(reg62);
+
+  a.intersect(&b);
+  assert_eq!(a.contains(reg8), false);
+  assert_eq!(a.contains(reg10), true);
+  assert_eq!(a.contains(reg62), true);
+
+  b.insert(reg63);
+  a.insert(reg64);
+  a.intersect(&b);
+
+  assert_eq!(a.contains(reg8), false);
+  assert_eq!(a.contains(reg10), true);
+  assert_eq!(a.contains(reg62), true);
+  assert_eq!(a.contains(reg63), false);
+  assert_eq!(a.contains(reg64), false);
+
+  c.insert(reg0);
+  d.insert(reg1);
+  c.insert(reg2);
+  d.insert(reg2);
+  c.insert(reg66);
+  d.insert(reg128);
+
+  assert_eq!(c.data[0], 5);
+  assert_eq!(c.data[1], 4);
+
+  assert_eq!(d.data[0], 6);
+  assert_eq!(d.data[1], 0);
+  assert_eq!(d.data[2], 1);
+
+  c.remove(&d);
+
+  assert_eq!(c.data[0], 1);
+  assert_eq!(c.data[1], 4);
+}
+
+#[test]
+fn union() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+
+  let mut a: BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  assert_eq!(a.contains(reg8), true);
+
+  a.union(&b);
+  assert_eq!(a.contains(reg8), true);
+  assert_eq!(b.contains(reg8), false);
+
+  a.insert(reg10);
+  assert_eq!(a.contains(reg10), true);
+
+  b.insert(reg10);
+  assert_eq!(b.contains(reg10), true);
+
+  a.insert(reg62);
+  assert_eq!(a.contains(reg62), true);
+
+  b.insert(reg62);
+  assert_eq!(b.contains(reg62), true);
+
+  a.union(&b);
+  assert_eq!(a.contains(reg8), true);
+  assert_eq!(a.contains(reg10), true);
+  assert_eq!(a.contains(reg62), true);
+
+  assert_eq!(b.contains(reg8), false);
+  assert_eq!(b.contains(reg10), true);
+  assert_eq!(b.contains(reg62), true);
+
+  b.insert(reg63);
+  assert_eq!(b.contains(reg63), true);
+
+  a.insert(reg64);
+  assert_eq!(a.contains(reg64), true);
+
+  a.union(&b);
+  assert_eq!(a.contains(reg8), true);
+  assert_eq!(a.contains(reg10), true);
+  assert_eq!(a.contains(reg62), true);
+  assert_eq!(a.contains(reg63), true);
+  assert_eq!(a.contains(reg64), true);
+
+  assert_eq!(b.contains(reg8), false);
+  assert_eq!(b.contains(reg10), true);
+  assert_eq!(b.contains(reg62), true);
+  assert_eq!(b.contains(reg63), true);
+
+  assert_eq!(a.equals(&b), false);
+  assert_eq!(b.equals(&a), false);
+
+  b.union(&a);
+  assert_eq!(a.equals(&b), true);
+  assert_eq!(b.equals(&a), true);
+
+  assert_eq!(a.contains(reg8), true);
+  assert_eq!(a.contains(reg10), true);
+  assert_eq!(a.contains(reg62), true);
+  assert_eq!(a.contains(reg63), true);
+  assert_eq!(a.contains(reg64), true);
+
+  assert_eq!(b.contains(reg8), true);
+  assert_eq!(b.contains(reg10), true);
+  assert_eq!(b.contains(reg62), true);
+  assert_eq!(b.contains(reg63), true);
+  assert_eq!(b.contains(reg64), true);
+}
+
+#[test]
+fn remove() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+
+  let mut a: BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+  let mut c: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  assert_eq!(a.contains(reg8), true);
+  assert_eq!(a.is_empty(), false);
+  assert_eq!(b.is_empty(), true);
+
+  a.remove(&b);
+  assert_eq!(a.contains(reg8), true);
+  assert_eq!(b.contains(reg8), false);
+  assert_eq!(a.is_empty(), false);
+  assert_eq!(b.is_empty(), true);
+
+  a.insert(reg10);
+  assert_eq!(a.contains(reg10), true);
+
+  b.insert(reg10);
+  assert_eq!(b.contains(reg10), true);
+  assert_eq!(b.is_empty(), false);
+
+  a.insert(reg62);
+  assert_eq!(a.contains(reg62), true);
+
+  b.insert(reg62);
+  assert_eq!(b.contains(reg62), true);
+
+  a.insert(reg64);
+  assert_eq!(a.contains(reg64), true);
+
+  b.insert(reg64);
+  assert_eq!(b.contains(reg64), true);
+
+  a.remove(&b);
+  assert_eq!(a.contains(reg8), true);
+  assert_eq!(a.contains(reg10), false);
+  assert_eq!(a.contains(reg62), false);
+  assert_eq!(a.contains(reg64), false);
+
+  assert_eq!(b.contains(reg8), false);
+  assert_eq!(b.contains(reg10), true);
+  assert_eq!(b.contains(reg62), true);
+  assert_eq!(b.contains(reg64), true);
+
+  assert_eq!(b.is_empty(), false);
+  assert_eq!(c.is_empty(), true);
+  c.remove(&b);
+  assert_eq!(b.is_empty(), false);
+  assert_eq!(c.is_empty(), true);
+}
+
+#[test]
+fn intersects() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+
+  let mut a: BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  assert_eq!(a.intersects(&b), false);
+  assert_eq!(b.intersects(&a), false);
+
+  a.insert(reg10);
+  assert_eq!(a.intersects(&b), false);
+  assert_eq!(b.intersects(&a), false);
+
+  a.insert(reg62);
+  assert_eq!(a.intersects(&b), false);
+  assert_eq!(b.intersects(&a), false);
+
+  b.insert(reg62);
+  assert_eq!(a.intersects(&b), true);
+  assert_eq!(b.intersects(&a), true);
+
+  b.insert(reg64);
+  assert_eq!(a.intersects(&b), true);
+  assert_eq!(b.intersects(&a), true);
+
+  b.delete(reg62);
+  assert_eq!(a.intersects(&b), false);
+  assert_eq!(b.intersects(&a), false);
+}
+
+#[test]
+fn is_subset_of() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+
+  let mut a: BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+
+  assert_eq!(a.is_subset_of(&b), true);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  a.insert(reg8);
+  assert_eq!(a.is_subset_of(&b), false);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  a.insert(reg10);
+
+  assert_eq!(a.is_subset_of(&b), false);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  a.insert(reg62);
+  b.insert(reg62);
+
+  assert_eq!(a.is_subset_of(&b), false);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  b.insert(reg64);
+
+  assert_eq!(a.is_subset_of(&b), false);
+  assert_eq!(b.is_subset_of(&a), false);
+}
+
+#[test]
+fn is_subset_of2() {
+  let reg0 = Reg::new_real(RegClass::F64, 0, 0);
+  let reg1 = Reg::new_real(RegClass::F64, 0, 1);
+  let reg9 = Reg::new_real(RegClass::F64, 0, 9);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg255 = Reg::new_real(RegClass::F64, 0, 255);
+  let reg256 = Reg::new_virtual(RegClass::F64, 256);
+
+  let mut a: BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+
+  assert_eq!(a.is_subset_of(&b), true);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  a.insert(reg0);
+
+  assert_eq!(a.is_subset_of(&b), false);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  b.insert(reg0);
+
+  assert_eq!(a.is_subset_of(&b), true);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  b.insert(reg1);
+
+  assert_eq!(a.is_subset_of(&b), true);
+  assert_eq!(b.is_subset_of(&a), false);
+
+  a.insert(reg1);
+
+  assert_eq!(a.is_subset_of(&b), true);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  a.insert(reg9);
+
+  assert_eq!(a.is_subset_of(&b), false);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  b.insert(reg9);
+
+  assert_eq!(a.is_subset_of(&b), true);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  a.insert(reg63);
+
+  assert_eq!(a.is_subset_of(&b), false);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  b.insert(reg63);
+
+  assert_eq!(a.is_subset_of(&b), true);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  a.insert(reg64);
+
+  assert_eq!(a.is_subset_of(&b), false);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  b.insert(reg64);
+
+  assert_eq!(a.is_subset_of(&b), true);
+  assert_eq!(b.is_subset_of(&a), true);
+
+  b.insert(reg256);
+
+  assert_eq!(a.is_subset_of(&b), true);
+  assert_eq!(b.is_subset_of(&a), false);
+
+  a.insert(reg255);
+
+  assert_eq!(a.is_subset_of(&b), false);
+  assert_eq!(b.is_subset_of(&a), false);
+}
+
+
+#[test]
+fn equals() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+
+  let mut a: BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+
+  assert_eq!(a.equals(&b), true);
+  assert_eq!(b.equals(&a), true);
+
+  a.insert(reg8);
+  assert_eq!(a.equals(&b), false);
+  assert_eq!(b.equals(&a), false);
+
+  b.insert(reg8);
+  assert_eq!(a.equals(&b), true);
+  assert_eq!(b.equals(&a), true);
+
+  a.insert(reg10);
+  assert_eq!(a.equals(&b), false);
+  assert_eq!(b.equals(&a), false);
+
+  b.insert(reg10);
+  assert_eq!(a.equals(&b), true);
+  assert_eq!(b.equals(&a), true);
+
+  a.insert(reg62);
+  assert_eq!(a.equals(&b), false);
+  assert_eq!(b.equals(&a), false);
+
+  b.insert(reg62);
+  assert_eq!(a.equals(&b), true);
+  assert_eq!(b.equals(&a), true);
+
+  a.insert(reg63);
+  assert_eq!(a.equals(&b), false);
+  assert_eq!(b.equals(&a), false);
+
+  b.insert(reg63);
+  assert_eq!(a.equals(&b), true);
+  assert_eq!(b.equals(&a), true);
+
+  a.insert(reg64);
+  assert_eq!(a.equals(&b), false);
+  assert_eq!(b.equals(&a), false);
+
+  b.insert(reg64);
+  assert_eq!(a.equals(&b), true);
+  assert_eq!(b.equals(&a), true);
+
+  a.delete(reg64);
+  assert_eq!(a.equals(&b), false);
+  assert_eq!(b.equals(&a), false);
+}
+
+#[test]
+fn clone() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg192 = Reg::new_real(RegClass::F64, 0, 192);
+  let reg255 = Reg::new_real(RegClass::F64, 0, 255);
+
+  let mut a: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  assert_eq!(a.contains(reg8), true);
+
+  a.insert(reg10);
+  assert_eq!(a.contains(reg10), true);
+
+  a.insert(reg62);
+  assert_eq!(a.contains(reg10), true);
+
+  a.insert(reg63);
+  assert_eq!(a.contains(reg63), true);
+
+  a.insert(reg64);
+  assert_eq!(a.contains(reg64), true);
+
+  a.insert(reg192);
+  assert_eq!(a.contains(reg192), true);
+
+  a.insert(reg255);
+  assert_eq!(a.contains(reg255), true);
+
+  let b = a.clone();
+
+  assert_eq!(b.contains(reg8), true);
+  assert_eq!(b.contains(reg10), true);
+  assert_eq!(b.contains(reg62), true);
+  assert_eq!(b.contains(reg63), true);
+  assert_eq!(b.contains(reg64), true);
+  assert_eq!(b.contains(reg192), true);
+  assert_eq!(b.contains(reg255), true);
+
+  assert_eq!(b.equals(&a), true);
+  assert_eq!(a.equals(&b), true);
+}
+
+#[test]
+fn iterator() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg192 = Reg::new_real(RegClass::F64, 0, 192);
+  let reg255 = Reg::new_real(RegClass::F64, 0, 255);
+
+  let reg256 = Reg::new_virtual(RegClass::F64, 256);
+
+  let mut a: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  assert_eq!(a.data[0], 0x100);
+
+  a.insert(reg10);
+  assert_eq!(a.data[0], 0x500);
+
+  a.insert(reg62);
+  assert_eq!(a.data[0], 0x4000000000000500);
+
+  a.insert(reg63);
+  assert_eq!(a.data[0], 0xC000000000000500);
+
+  a.insert(reg64);
+  assert_eq!(a.data[1], 1);
+
+  a.insert(reg192);
+  assert_eq!(a.data[3], 1);
+
+  a.insert(reg255);
+  assert_eq!(a.data[3], 0x8000000000000001);
+
+  a.insert(reg256);
+  assert_eq!(a.data[8], 1);
+
+  let mut iter = a.iter();
+  assert_eq!(8, iter.next().unwrap().get_index());
+  assert_eq!(10, iter.next().unwrap().get_index());
+  assert_eq!(62, iter.next().unwrap().get_index());
+  assert_eq!(63, iter.next().unwrap().get_index());
+  assert_eq!(64, iter.next().unwrap().get_index());
+  assert_eq!(192, iter.next().unwrap().get_index());
+  assert_eq!(255, iter.next().unwrap().get_index());
+  assert_eq!(256, iter.next().unwrap().get_index());
+
+  assert_eq!(None, iter.next());
+}
+
+#[test]
+fn iterator_after_union() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg128 = Reg::new_real(RegClass::F64, 0, 128);
+
+  let mut a:BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  a.insert(reg10);
+  a.insert(reg62);
+  a.insert(reg63);
+  b.insert(reg64);
+  b.insert(reg128);
+
+  b.union(&a);
+
+  println!("{:x?}", b.data);
+  println!("{:?}", b.reg_vec);
+
+  assert_eq!(reg8, *b.reg_vec.get(&reg8.get_index()).unwrap());
+  assert_eq!(reg10, *b.reg_vec.get(&reg10.get_index()).unwrap());
+  assert_eq!(reg62, *b.reg_vec.get(&reg62.get_index()).unwrap());
+  assert_eq!(reg63, *b.reg_vec.get(&reg63.get_index()).unwrap());
+  assert_eq!(reg64, *b.reg_vec.get(&reg64.get_index()).unwrap());
+  assert_eq!(reg128, *b.reg_vec.get(&reg128.get_index()).unwrap());
+}
+
+#[test]
+fn iterator_after_remove() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg128 = Reg::new_real(RegClass::F64, 0, 128);
+
+  let mut a:BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  a.insert(reg10);
+  a.insert(reg62);
+  a.insert(reg63);
+  a.insert(reg64);
+  a.insert(reg128);
+
+  b.insert(reg64);
+  b.insert(reg128);
+
+  a.remove(&b);
+
+  println!("{:x?}", a.data);
+  println!("{:?}", a.reg_vec);
+
+  assert_eq!(a.reg_vec.len(), 4);
+}
+
+#[test]
+fn iterator_after_intersect() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg128 = Reg::new_real(RegClass::F64, 0, 128);
+
+  let mut a:BitSet = RegSet::empty();
+  let mut b: BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  a.insert(reg10);
+  a.insert(reg62);
+  a.insert(reg63);
+  a.insert(reg64);
+  a.insert(reg128);
+
+  b.insert(reg64);
+  b.insert(reg128);
+
+  a.intersect(&b);
+
+  println!("{:x?}", a.data);
+  println!("{:?}", a.reg_vec);
+
+  assert_eq!(a.reg_vec.len(), 2);
+}
+
+#[test]
+fn iterator_after_clone() {
+  let reg8 = Reg::new_real(RegClass::F64, 0, 8);
+  let reg10 = Reg::new_real(RegClass::F64, 0, 10);
+  let reg62 = Reg::new_real(RegClass::F64, 0, 62);
+  let reg63 = Reg::new_real(RegClass::F64, 0, 63);
+  let reg64 = Reg::new_real(RegClass::F64, 0, 64);
+  let reg128 = Reg::new_real(RegClass::F64, 0, 128);
+
+  let mut a:BitSet = RegSet::empty();
+
+  a.insert(reg8);
+  a.insert(reg10);
+  a.insert(reg62);
+  a.insert(reg63);
+  a.insert(reg64);
+  a.insert(reg128);
+
+  a.insert(reg64);
+  a.insert(reg128);
+
+  let b: BitSet = a.clone();
+
+  assert_eq!(a.reg_vec.len(), b.reg_vec.len());
+}
+
+
+#[test]
+fn insert_delete() {
+  let mut a: BitSet = RegSet::empty();
+  let mut b = Set::<Reg>::empty();
+
+  assert_eq!(a.is_empty(), true);
+  assert_eq!(b.is_empty(), true);
+
+  for i in 0..1000 {
+    let reg = Reg::new_virtual(RegClass::F64, i);
+
+    assert_eq!(b.contains(reg), false);
+    assert_eq!(a.contains(reg), false);
+    a.insert(reg);
+    b.insert(reg);
+    assert_eq!(a.contains(reg), true);
+    assert_eq!(b.contains(reg), true);
+
+    assert_eq!(i as usize + 1, a.card());
+    assert_eq!(i as usize + 1, b.card());
+
+    assert_eq!(a.card(), b.card());
+
+    for (reg_a, reg_b) in a.iter().zip(b.iter()) {
+      assert_eq!(a.contains(*reg_b), true);
+      assert_eq!(b.contains(*reg_a), true);
+    }
+  }
+
+  let c: BitSet = a.clone();
+
+  for reg in a.iter().zip(c.iter()) {
+    let (a, c) = reg;
+    assert_eq!(a, c);
+  }
+
+  assert_eq!(a.is_empty(), false);
+  assert_eq!(b.is_empty(), false);
+
+  for i in 0..1000 {
+    let reg = Reg::new_virtual(RegClass::F64, i);
+    assert_eq!(a.contains(reg), true);
+    assert_eq!(b.contains(reg), true);
+    a.delete(reg);
+    b.set.remove(&reg);
+    assert_eq!(a.contains(reg), false);
+    assert_eq!(b.contains(reg), false);
+
+    assert_eq!(999 - i as usize, a.card());
+    assert_eq!(999 - i as usize, b.card());
+    assert_eq!(a.card(), b.card());
+
+    for (reg_a, reg_b) in a.iter().zip(b.iter()) {
+      assert_eq!(a.contains(*reg_b), true);
+      assert_eq!(b.contains(*reg_a), true);
+    }
+  }
+
+  assert_eq!(a.is_empty(), true);
+  assert_eq!(b.is_empty(), true);
+}
+
+#[test]
+fn alternate_insert_delete() {
+  let mut a: BitSet = RegSet::empty();
+  let mut b = Set::<Reg>::empty();
+
+  assert_eq!(a.card(), 0);
+  assert_eq!(b.card(), 0);
+
+  assert_eq!(a.is_empty(), true);
+  assert_eq!(b.is_empty(), true);
+
+  for i in 0..1000 {
+    assert_eq!(a.card(), b.card());
+
+    if i > 0 {
+      let previous_reg = Reg::new_virtual(RegClass::F64, i - 1);
+
+      if a.contains(previous_reg) && b.contains(previous_reg) {
+        assert_eq!(a.is_empty(), false);
+        assert_eq!(b.is_empty(), false);
+
+        assert_eq!(a.contains(previous_reg), true);
+        assert_eq!(b.contains(previous_reg), true);
+
+        a.delete(previous_reg);
+        b.set.remove(&previous_reg);
+
+        assert_eq!(a.is_empty(), true);
+        assert_eq!(b.is_empty(), true);
+
+        assert_eq!(a.contains(previous_reg), false);
+        assert_eq!(b.contains(previous_reg), false);
+      }
+    }
+
+    let reg = Reg::new_virtual(RegClass::F64, i);
+    assert_eq!(a.contains(reg), false);
+    assert_eq!(b.contains(reg), false);
+    assert_eq!(a.is_empty(), true);
+    assert_eq!(b.is_empty(), true);
+    a.insert(reg);
+    b.insert(reg);
+    assert_eq!(a.is_empty(), false);
+    assert_eq!(b.is_empty(), false);
+    assert_eq!(a.contains(reg), true);
+    assert_eq!(b.contains(reg), true);
+  }
+
+  let reg999 = Reg::new_virtual(RegClass::F64, 999);
+
+  assert_eq!(a.contains(reg999), true);
+  assert_eq!(b.contains(reg999), true);
+
+  assert_eq!(a.card(), 1);
+  assert_eq!(b.card(), 1);
+
+  assert_eq!(a.is_empty(), false);
+  assert_eq!(b.is_empty(), false);
+
+  a.delete(reg999);
+  b.set.remove(&reg999);
+
+  assert_eq!(a.card(), 0);
+  assert_eq!(b.card(), 0);
+
+  assert_eq!(a.is_empty(), true);
+  assert_eq!(b.is_empty(), true);
+}
 
 //=============================================================================
 // Queues
