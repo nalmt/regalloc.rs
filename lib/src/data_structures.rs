@@ -22,7 +22,6 @@ use crate::interface::Function;
 // RegSet
 
 const BLOCK_SIZE: usize = 32;
-type Block = u32;
 
 pub struct BitSet {
   data: Vec<u64>,
@@ -75,13 +74,9 @@ impl RegSet for BitSet {
     let mut counter = 0;
 
     for i in 0..self.data.len() {
-      for k in 0..BLOCK_SIZE {
-        if (self.data[i] >> k & 1) == 1 {
-          counter += 1;
-        }
-      }
+      counter += self.data[i].count_ones();
     }
-    counter
+    counter as usize
   }
 
   fn insert(&mut self, item: Reg) {
@@ -255,18 +250,21 @@ fn test_grand_nombre() {
   assert_eq!(a.is_empty(), true);
   assert_eq!(b.is_empty(), true);
 
-  for i in 0..99 {
+  for i in 0..999 {
     let reg = Reg { do_not_access_this_directly: i };
     a.insert(reg);
     b.insert(reg);
 
-    assert_eq!(a.card(), b.card(), "{}", i + 1);
+   // assert_eq!(a.card(), b.card(), "{}", i+1);
+    assert_eq!(a.contains(reg), true);
+    assert_eq!(b.contains(reg), true);
 
-    // for reg in a.iter().zip(b.iter()) {
-    //   let (a, b) = reg;
-    //   assert_eq!(a, b.get_index());
-    // }
+    for (reg_a, reg_b) in a.iter().zip(b.iter()) {
+      assert_eq!(a.contains(*reg_b), true);
+      assert_eq!(b.contains(Reg { do_not_access_this_directly: reg_a as u32 }), true);
+    }
   }
+
   let c: BitSet = a.clone();
 
   for reg in a.iter().zip(c.iter()) {
@@ -277,11 +275,16 @@ fn test_grand_nombre() {
   assert_eq!(a.is_empty(), false);
   assert_eq!(b.is_empty(), false);
 
-  for i in 0..99 {
+  for i in 0..999 {
     let reg = Reg { do_not_access_this_directly: i };
     a.delete(reg);
     b.set.remove(&reg);
+
+  for (reg_a, reg_b) in a.iter().zip(b.iter()) {
+    assert_eq!(a.contains(*reg_b), true);
+    assert_eq!(b.contains(Reg { do_not_access_this_directly: reg_a as u32 }), true);
   }
+}
 
   assert_eq!(a.is_empty(), true);
   assert_eq!(b.is_empty(), true);
@@ -412,6 +415,7 @@ fn delete() {
 
   let reg62 = Reg::new_real(RegClass::F64, 0, 62);
   a.insert(reg62);
+
   assert_eq!(a.data[0], 0x4000000000000500);
 
   a.delete(reg8);
