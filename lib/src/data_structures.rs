@@ -80,22 +80,22 @@ impl RegSet for BitSet {
   }
 
   fn insert(&mut self, item: Reg) {
-    let key = item.get_index();
-    let index = key / BLOCK_SIZE;
-    let bit = key % BLOCK_SIZE;
+    let reg_index = item.get_index();
+    let data_index = reg_index / BLOCK_SIZE;
+    let offset = reg_index % BLOCK_SIZE;
 
-    while index >= self.data.len() {
+    while data_index >= self.data.len() {
       self.data.push(0);
     }
-    self.data[index] |= 1 << bit;
+    self.data[data_index] |= 1 << offset;
   }
 
   fn delete(&mut self, item: Reg) {
-    let key = item.get_index();
-    let index = key / BLOCK_SIZE;
-    let bit = key % BLOCK_SIZE;
+    let reg_index = item.get_index();
+    let data_index = reg_index / BLOCK_SIZE;
+    let offset = reg_index % BLOCK_SIZE;
 
-    self.data[index] &= !(1 << bit);
+    self.data[data_index] &= !(1 << offset);
   }
 
   fn is_empty(&self) -> bool {
@@ -108,11 +108,15 @@ impl RegSet for BitSet {
   }
 
   fn contains(&self, item: Reg) -> bool {
-    let key = item.get_index();
-    let index = key / BLOCK_SIZE;
-    let bit = key % BLOCK_SIZE;
+    let reg_index = item.get_index();
+    let data_index = reg_index / BLOCK_SIZE;
+    let offset = reg_index % BLOCK_SIZE;
 
-    (1 & (self.data[index] >> bit)) != 0
+    if data_index >= self.data.len() {
+      false
+    } else {
+      (1 & (self.data[data_index] >> offset)) != 0
+    }
   }
 
   fn intersect(&mut self, other: &Self) {
@@ -125,7 +129,7 @@ impl RegSet for BitSet {
     };
 
     for i in 0..vec_size {
-      self.data[i] = self.data[i] & other.data[i];
+      self.data[i] &= other.data[i];
     }
     for i in vec_size..self.data.len() {
       self.data[i] = 0;
@@ -144,7 +148,7 @@ impl RegSet for BitSet {
       }
     };
     for i in 0..vec_size {
-      self.data[i] = self.data[i] | other.data[i];
+      self.data[i] |= other.data[i];
     }
   }
 
@@ -243,57 +247,8 @@ impl<'set> Iterator for BitSetIter<'set> {
 }
 
 #[test]
-fn test_grand_nombre() {
-  let mut a: BitSet = RegSet::empty();
-  let mut b = Set::<Reg>::empty();
-
-  assert_eq!(a.is_empty(), true);
-  assert_eq!(b.is_empty(), true);
-
-  for i in 0..999 {
-    let reg = Reg { do_not_access_this_directly: i };
-    a.insert(reg);
-    b.insert(reg);
-
-   // assert_eq!(a.card(), b.card(), "{}", i+1);
-    assert_eq!(a.contains(reg), true);
-    assert_eq!(b.contains(reg), true);
-
-    for (reg_a, reg_b) in a.iter().zip(b.iter()) {
-      assert_eq!(a.contains(*reg_b), true);
-      assert_eq!(b.contains(Reg { do_not_access_this_directly: reg_a as u32 }), true);
-    }
-  }
-
-  let c: BitSet = a.clone();
-
-  for reg in a.iter().zip(c.iter()) {
-    let (a, c) = reg;
-    assert_eq!(a, c);
-  }
-
-  assert_eq!(a.is_empty(), false);
-  assert_eq!(b.is_empty(), false);
-
-  for i in 0..999 {
-    let reg = Reg { do_not_access_this_directly: i };
-    a.delete(reg);
-    b.set.remove(&reg);
-
-  for (reg_a, reg_b) in a.iter().zip(b.iter()) {
-    assert_eq!(a.contains(*reg_b), true);
-    assert_eq!(b.contains(Reg { do_not_access_this_directly: reg_a as u32 }), true);
-  }
-}
-
-  assert_eq!(a.is_empty(), true);
-  assert_eq!(b.is_empty(), true);
-}
-
-#[test]
 fn is_empty() {
   let mut a: BitSet = RegSet::empty();
-  assert_eq!(a.data[0], 0);
 
   assert_eq!(a.is_empty(), true);
 
@@ -782,6 +737,144 @@ fn iterator() {
   assert_eq!(Some(255), iter.next());
   assert_eq!(None, iter.next());
 }
+
+#[test]
+fn insert_delete() {
+  let mut a: BitSet = RegSet::empty();
+  let mut b = Set::<Reg>::empty();
+
+  assert_eq!(a.is_empty(), true);
+  assert_eq!(b.is_empty(), true);
+
+  for i in 0..1000 {
+    let reg = Reg::new_virtual(RegClass::F64, i);
+
+    assert_eq!(b.contains(reg), false);
+    assert_eq!(a.contains(reg), false);
+    a.insert(reg);
+    b.insert(reg);
+    assert_eq!(a.contains(reg), true);
+    assert_eq!(b.contains(reg), true);
+
+    assert_eq!(i as usize + 1, a.card());
+    assert_eq!(i as usize + 1, b.card());
+
+    assert_eq!(a.card(), b.card());
+
+    for (reg_a, reg_b) in a.iter().zip(b.iter()) {
+      assert_eq!(a.contains(*reg_b), true);
+      assert_eq!(
+        b.contains(Reg::new_virtual(RegClass::F64, reg_a as u32)),
+        true
+      );
+    }
+  }
+
+  let c: BitSet = a.clone();
+
+  for reg in a.iter().zip(c.iter()) {
+    let (a, c) = reg;
+    assert_eq!(a, c);
+  }
+
+  assert_eq!(a.is_empty(), false);
+  assert_eq!(b.is_empty(), false);
+
+  for i in 0..1000 {
+    let reg = Reg::new_virtual(RegClass::F64, i);
+    assert_eq!(a.contains(reg), true);
+    assert_eq!(b.contains(reg), true);
+    a.delete(reg);
+    b.set.remove(&reg);
+    assert_eq!(a.contains(reg), false);
+    assert_eq!(b.contains(reg), false);
+
+    assert_eq!(999 - i as usize, a.card());
+    assert_eq!(999 - i as usize, b.card());
+    assert_eq!(a.card(), b.card());
+
+    for (reg_a, reg_b) in a.iter().zip(b.iter()) {
+      assert_eq!(a.contains(*reg_b), true);
+      assert_eq!(
+        b.contains(Reg::new_virtual(RegClass::F64, reg_a as u32)),
+        true
+      );
+    }
+  }
+
+  assert_eq!(a.is_empty(), true);
+  assert_eq!(b.is_empty(), true);
+}
+
+#[test]
+fn alternate_insert_delete() {
+  let mut a: BitSet = RegSet::empty();
+  let mut b = Set::<Reg>::empty();
+
+  assert_eq!(a.card(), 0);
+  assert_eq!(b.card(), 0);
+
+  assert_eq!(a.is_empty(), true);
+  assert_eq!(b.is_empty(), true);
+
+  for i in 0..1000 {
+    assert_eq!(a.card(), b.card());
+
+    if i > 0 {
+      let previous_reg = Reg::new_virtual(RegClass::F64, i - 1);
+
+      if a.contains(previous_reg) && b.contains(previous_reg) {
+        assert_eq!(a.is_empty(), false);
+        assert_eq!(b.is_empty(), false);
+
+        assert_eq!(a.contains(previous_reg), true);
+        assert_eq!(b.contains(previous_reg), true);
+
+        a.delete(previous_reg);
+        b.set.remove(&previous_reg);
+
+        assert_eq!(a.is_empty(), true);
+        assert_eq!(b.is_empty(), true);
+
+        assert_eq!(a.contains(previous_reg), false);
+        assert_eq!(b.contains(previous_reg), false);
+      }
+    }
+
+    let reg = Reg::new_virtual(RegClass::F64, i);
+    assert_eq!(a.contains(reg), false);
+    assert_eq!(b.contains(reg), false);
+    assert_eq!(a.is_empty(), true);
+    assert_eq!(b.is_empty(), true);
+    a.insert(reg);
+    b.insert(reg);
+    assert_eq!(a.is_empty(), false);
+    assert_eq!(b.is_empty(), false);
+    assert_eq!(a.contains(reg), true);
+    assert_eq!(b.contains(reg), true);
+  }
+
+  let reg999 = Reg::new_virtual(RegClass::F64, 999);
+
+  assert_eq!(a.contains(reg999), true);
+  assert_eq!(b.contains(reg999), true);
+
+  assert_eq!(a.card(), 1);
+  assert_eq!(b.card(), 1);
+
+  assert_eq!(a.is_empty(), false);
+  assert_eq!(b.is_empty(), false);
+
+  a.delete(reg999);
+  b.set.remove(&reg999);
+
+  assert_eq!(a.card(), 0);
+  assert_eq!(b.card(), 0);
+
+  assert_eq!(a.is_empty(), true);
+  assert_eq!(b.is_empty(), true);
+}
+
 //=============================================================================
 // Queues
 
