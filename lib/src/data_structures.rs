@@ -21,7 +21,7 @@ use crate::interface::Function;
 //=============================================================================
 // RegSet
 
-const BLOCK_SIZE: usize = 32;
+const BLOCK_SIZE: usize = 64;
 
 pub struct BitSet {
   data: Vec<u64>,
