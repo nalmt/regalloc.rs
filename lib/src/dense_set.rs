@@ -10,7 +10,7 @@ const NUMBER_REAL_REG: usize = 64;
 #[derive(Clone)]
 pub struct RegBitSet {
     bits: Vec<u64>,
-    data: Vec<Reg>,
+    data: Vec<Option<Reg>>,
 }
 
 pub trait RegSet {
@@ -42,7 +42,7 @@ impl RegSet for RegBitSet {
     fn empty() -> Self {
         Self {
             bits: Vec::<u64>::new(),
-            data: Vec::<Reg>::new(),
+            data: Vec::<Option<Reg>>::new(),
         }
     }
 
@@ -70,14 +70,31 @@ impl RegSet for RegBitSet {
 
     fn insert(&mut self, item: Reg) {
         if !self.contains(item) {
-            self.bits_insert(item);
-            self.data_insert(item);
+            let reg_index = RegBitSet::get_reg_index(item);
+            let bits_index = RegBitSet::get_bits_index(reg_index);
+            let offset = RegBitSet::get_offset(reg_index);
+
+            if bits_index >= self.bits.len() {
+                self.bits.resize(bits_index + 1, 0);
+            }
+            self.bits[bits_index] |= 1 << offset;
+
+            if reg_index >= self.data.len() {
+                self.data.resize(reg_index + 1, None);
+            }
+            self.data[reg_index] = Some(item);
         }
     }
 
     fn delete(&mut self, item: Reg) {
-        self.data_delete(item);
-        self.bits_delete(item);
+        if self.contains(item) {
+            let reg_index = RegBitSet::get_reg_index(item);
+            let bits_index = RegBitSet::get_bits_index(reg_index);
+            let offset = RegBitSet::get_offset(reg_index);
+
+            self.bits[bits_index] &= !(1 << offset);
+            self.data[reg_index] = None;
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -105,27 +122,32 @@ impl RegSet for RegBitSet {
         let mut res: RegBitSet = RegSet::empty();
 
         for &reg in vec.iter() {
-            res.bits_insert(reg);
+            res.insert(reg);
         }
-        res.data = vec;
-
         res
     }
 
     fn to_vec(&self) -> Vec<Reg> {
-        return self.data.clone();
+        let mut res = Vec::<Reg>::new();
+
+        for item in self.data.iter() {
+            if let Some(reg) = item {
+                res.push(*reg);
+            }
+        }
+        res
     }
 
     fn intersect(&mut self, other: &Self) {
         let smallest_set_size = cmp::min(self.bits.len(), other.bits.len());
-        let mut res = Vec::<Reg>::new();
 
-        for &item in self.data.iter() {
-            if other.contains(item) {
-                res.push(item);
+        for item in self.data.iter_mut() {
+            if let Some(reg) = item {
+                if !other.contains(*reg) {
+                    *item = None;
+                }
             }
         }
-        self.data = res;
 
         for i in 0..smallest_set_size {
             self.bits[i] &= other.bits[i];
@@ -141,8 +163,10 @@ impl RegSet for RegBitSet {
         let greatest_set_size = cmp::max(self.bits.len(), other.bits.len());
 
         for &item in other.data.iter() {
-            if !self.contains(item) {
-                self.data.push(item);
+            if let Some(reg) = item {
+                if !self.contains(reg) {
+                    self.data_insert(reg);
+                }
             }
         }
 
@@ -161,8 +185,10 @@ impl RegSet for RegBitSet {
         let smallest_set_size = cmp::min(self.bits.len(), other.bits.len());
 
         for &item in other.data.iter() {
-            if self.contains(item) {
-                self.data_delete(item);
+            if let Some(reg) = item {
+                if self.contains(reg) {
+                    self.data_delete(reg);
+                }
             }
         }
 
@@ -208,14 +234,17 @@ impl RegSet for RegBitSet {
 
 impl RegBitSet {
     fn bits_insert(&mut self, item: Reg) {
-        let reg_index = RegBitSet::get_reg_index(item);
-        let bits_index = RegBitSet::get_bits_index(reg_index);
-        let offset = RegBitSet::get_offset(reg_index);
+        if !self.contains(item) {
+            let reg_index = RegBitSet::get_reg_index(item);
+            let bits_index = RegBitSet::get_bits_index(reg_index);
+            let offset = RegBitSet::get_offset(reg_index);
 
-        if bits_index >= self.bits.len() {
-            self.bits.resize(bits_index + 1, 0);
+            if bits_index >= self.bits.len() {
+                self.bits.resize(bits_index + 1, 0);
+            }
+
+            self.bits[bits_index] |= 1 << offset;
         }
-        self.bits[bits_index] |= 1 << offset;
     }
 
     fn bits_delete(&mut self, item: Reg) {
@@ -229,28 +258,24 @@ impl RegBitSet {
     }
 
     fn data_insert(&mut self, item: Reg) {
-        self.data.push(item);
+        if !self.contains(item) {
+            let reg_index = RegBitSet::get_reg_index(item);
+
+            if reg_index >= self.data.len() {
+                self.data.resize(reg_index + 1, None);
+            }
+            self.data[reg_index] = Some(item);
+        }
     }
 
     /// Delete the item only in the registers vector (self.data).
-    /// Time complexity is O(n).
+    /// Time complexity is O(1).
     fn data_delete(&mut self, item: Reg) {
-        let mut reg_index = 0;
-        for &mut reg in self.data.iter_mut() {
-            if reg == item {
-                self.data.swap_remove(reg_index);
-                break;
-            }
-            reg_index += 1;
+        if self.contains(item) {
+            let reg_index = RegBitSet::get_reg_index(item);
+
+            self.data[reg_index] = None;
         }
-    }
-    fn data_get_item(&self, index: usize, real: bool) -> Option<&Reg> {
-        for reg in self.data.iter() {
-            if reg.is_real() == real && reg.get_index() == index {
-                return Some(&reg);
-            }
-        }
-        None
     }
 
     fn get_reg_index(item: Reg) -> usize {
@@ -281,6 +306,7 @@ pub struct RegBitSetIter<'set> {
     reg_set: &'set RegBitSet,
     index: usize,
 }
+
 impl RegBitSet {
     pub fn iter(&self) -> RegBitSetIter {
         let s = {
@@ -298,6 +324,7 @@ impl RegBitSet {
         }
     }
 }
+
 impl<'set> Iterator for RegBitSetIter<'set> {
     type Item = &'set Reg;
 
@@ -313,23 +340,13 @@ impl<'set> Iterator for RegBitSetIter<'set> {
                 if iter == 0 {
                     None
                 } else {
-                    let reg_index;
-                    let real;
-
-                    if self.index >= NUMBER_REAL_REG / BLOCK_SIZE {
-                        reg_index = iter.trailing_zeros() as usize
-                            + BLOCK_SIZE * (self.index - NUMBER_REAL_REG / BLOCK_SIZE);
-                        real = false;
-                    } else {
-                        reg_index = iter.trailing_zeros() as usize + BLOCK_SIZE * self.index;
-                        real = true;
-                    }
+                    let reg_index = iter.trailing_zeros() as usize + BLOCK_SIZE * self.index;
 
                     // Set the register that have been read to 0.
                     iter &= !(1 << iter.trailing_zeros());
                     self.set_iter = Some(iter);
 
-                    self.reg_set.data_get_item(reg_index, real)
+                    self.reg_set.data.get(reg_index)?.as_ref()
                 }
             }
         }
@@ -400,13 +417,11 @@ fn insert_same_reg_twice() {
 
     let mut a: RegBitSet = RegSet::empty();
 
-    assert_eq!(a.data.len(), 0);
     assert_eq!(a.card(), 0);
     assert!(a.is_empty());
 
     a.insert(reg8);
     a.insert(reg8);
-    assert_eq!(a.data.len(), 1);
     assert_eq!(a.card(), 1);
     assert_eq!(a.is_empty(), false);
 }
@@ -417,7 +432,6 @@ fn insert_real_and_virtual() {
     let virtual_reg_8 = Reg::new_virtual(RegClass::F64, 8);
 
     let a: RegBitSet = RegSet::two(real_reg_8, virtual_reg_8);
-    assert_eq!(a.data.len(), 2);
     assert_eq!(a.card(), 2);
     assert_eq!(a.is_empty(), false);
 
@@ -610,13 +624,16 @@ fn delete_same_reg_twice() {
 
     let mut a: RegBitSet = RegSet::unit(reg8);
 
-    assert_eq!(a.data.len(), 1);
+    assert_eq!(a.data[reg8.get_index()], Some(reg8));
     assert_eq!(a.card(), 1);
     assert_eq!(a.is_empty(), false);
 
     a.delete(reg8);
+    assert_eq!(a.data[reg8.get_index()], None);
+
     a.delete(reg8);
-    assert_eq!(a.data.len(), 0);
+    assert_eq!(a.data[reg8.get_index()], None);
+
     assert_eq!(a.card(), 0);
     assert!(a.is_empty());
 }
@@ -1143,14 +1160,31 @@ fn remove_2() {
     a.insert(reg10);
     a.insert(reg62);
     a.insert(reg256);
-    assert_eq!(a.data.len(), 4);
+    assert_eq!(a.card(), 4);
+    assert_eq!(a.data[reg8.get_index()], Some(reg8));
+    assert_eq!(a.data[reg10.get_index()], Some(reg10));
+    assert_eq!(a.data[reg62.get_index()], Some(reg62));
+    assert_eq!(a.data[NUMBER_REAL_REG + reg256.get_index()], Some(reg256));
 
     b.insert(reg256);
-    assert_eq!(b.data.len(), 1);
+    assert_eq!(b.card(), 1);
+    assert_eq!(b.data[reg8.get_index()], None);
+    assert_eq!(b.data[reg10.get_index()], None);
+    assert_eq!(b.data[reg62.get_index()], None);
+    assert_eq!(b.data[NUMBER_REAL_REG + reg256.get_index()], Some(reg256));
 
     a.remove(&b);
-    assert_eq!(a.data.len(), 3);
-    assert_eq!(b.data.len(), 1);
+    assert_eq!(a.card(), 3);
+    assert_eq!(a.data[reg8.get_index()], Some(reg8));
+    assert_eq!(a.data[reg10.get_index()], Some(reg10));
+    assert_eq!(a.data[reg62.get_index()], Some(reg62));
+    assert_eq!(a.data[NUMBER_REAL_REG + reg256.get_index()], None);
+
+    assert_eq!(b.card(), 1);
+    assert_eq!(b.data[reg8.get_index()], None);
+    assert_eq!(b.data[reg10.get_index()], None);
+    assert_eq!(b.data[reg62.get_index()], None);
+    assert_eq!(b.data[NUMBER_REAL_REG + reg256.get_index()], Some(reg256));
 }
 
 #[test]
@@ -1164,17 +1198,40 @@ fn intersect_2() {
     let mut a: RegBitSet = RegSet::empty();
     let mut b: RegBitSet = RegSet::empty();
 
-    a.insert(reg8);
     a.insert(reg10);
     a.insert(reg62);
     a.insert(reg63);
     a.insert(reg256);
 
+    assert_eq!(a.data[reg8.get_index()], None);
+    assert_eq!(a.data[reg10.get_index()], Some(reg10));
+    assert_eq!(a.data[reg62.get_index()], Some(reg62));
+    assert_eq!(a.data[reg63.get_index()], Some(reg63));
+    assert_eq!(a.data[NUMBER_REAL_REG + reg256.get_index()], Some(reg256));
+
     b.insert(reg8);
     b.insert(reg256);
 
+    assert_eq!(b.data[reg8.get_index()], Some(reg8));
+    assert_eq!(b.data[reg10.get_index()], None);
+    assert_eq!(b.data[reg62.get_index()], None);
+    assert_eq!(b.data[reg63.get_index()], None);
+    assert_eq!(b.data[NUMBER_REAL_REG + reg256.get_index()], Some(reg256));
+
     a.intersect(&b);
-    assert_eq!(a.data.len(), 2);
+    assert_eq!(a.card(), 1);
+
+    assert_eq!(a.data[reg8.get_index()], None);
+    assert_eq!(a.data[reg10.get_index()], None);
+    assert_eq!(a.data[reg62.get_index()], None);
+    assert_eq!(a.data[reg63.get_index()], None);
+    assert_eq!(a.data[NUMBER_REAL_REG + reg256.get_index()], Some(reg256));
+
+    assert_eq!(b.data[reg8.get_index()], Some(reg8));
+    assert_eq!(b.data[reg10.get_index()], None);
+    assert_eq!(b.data[reg62.get_index()], None);
+    assert_eq!(b.data[reg63.get_index()], None);
+    assert_eq!(b.data[NUMBER_REAL_REG + reg256.get_index()], Some(reg256));
 }
 
 #[test]
