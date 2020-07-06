@@ -1,4 +1,5 @@
 use super::{FixedInterval, IntId, Intervals, Mention, MentionMap, VirtualInterval};
+use crate::dense_set::{RegBitSet, RegSet};
 use crate::{
     analysis_control_flow::{CFGInfo, InstIxToBlockIxMap},
     analysis_data_flow::{
@@ -10,6 +11,7 @@ use crate::{
     union_find::UnionFind,
     AnalysisError, Function, RealRegUniverse, RegClass, TypedIxVec,
 };
+
 use log::{debug, info, log_enabled, Level};
 use smallvec::{smallvec, SmallVec};
 use std::{fmt, mem};
@@ -77,9 +79,9 @@ pub(crate) struct AnalysisInfo {
     /// All the intervals, fixed or virtual.
     pub(crate) intervals: Intervals,
     /// Liveins per block.
-    pub(crate) liveins: TypedIxVec<BlockIx, SparseSet<Reg>>,
+    pub(crate) liveins: TypedIxVec<BlockIx, RegBitSet>,
     /// Liveouts per block.
-    pub(crate) liveouts: TypedIxVec<BlockIx, SparseSet<Reg>>,
+    pub(crate) liveouts: TypedIxVec<BlockIx, RegBitSet>,
     /// Blocks's loop depths.
     pub(crate) _loop_depth: TypedIxVec<BlockIx, u32>,
     /// Maps InstIxs to BlockIxs.
@@ -134,7 +136,7 @@ pub(crate) fn run<F: Function>(
     debug_assert!(liveout_sets_per_block.len() == func.blocks().len() as u32);
 
     // Verify livein set of entry block against liveins specified by function (e.g., ABI params).
-    let func_liveins = SparseSet::from_vec(
+    let func_liveins: RegBitSet = RegSet::from_vec(
         func.func_liveins()
             .to_vec()
             .into_iter()
@@ -146,7 +148,7 @@ pub(crate) fn run<F: Function>(
     }
 
     // Add function liveouts to every block ending in a return.
-    let func_liveouts = SparseSet::from_vec(
+    let func_liveouts: RegBitSet = RegSet::from_vec(
         func.func_liveouts()
             .to_vec()
             .into_iter()
@@ -213,8 +215,8 @@ fn get_range_frags_for_block<F: Function>(
     reg_universe: &RealRegUniverse,
     vreg_classes: &Vec<RegClass>,
     bix: BlockIx,
-    livein: &SparseSet<Reg>,
-    liveout: &SparseSet<Reg>,
+    livein: &RegBitSet,
+    liveout: &RegBitSet,
     // Temporary state reusable across function calls.
     visited: &mut Vec<u32>,
     state: &mut Vec</*rreg index, then vreg index, */ Option<RangeFrag>>,
@@ -409,8 +411,8 @@ fn get_range_frags<F: Function>(
     func: &F,
     rvb: &RegVecsAndBounds,
     reg_universe: &RealRegUniverse,
-    liveins: &TypedIxVec<BlockIx, SparseSet<Reg>>,
-    liveouts: &TypedIxVec<BlockIx, SparseSet<Reg>>,
+    liveins: &TypedIxVec<BlockIx, RegBitSet>,
+    liveouts: &TypedIxVec<BlockIx, RegBitSet>,
 ) -> (
     Vec</*rreg index, then vreg index, */ SmallVec<[RangeFragIx; 8]>>,
     Vec<RangeFrag>,

@@ -1,4 +1,5 @@
 use super::{next_use, IntId, Location, RegUses, VirtualInterval};
+use crate::dense_set::{RegBitSet, RegSet};
 use crate::{
     data_structures::{BlockIx, InstPoint, Point},
     inst_stream::{InstExtPoint, InstToInsert, InstToInsertAndExtPoint},
@@ -234,8 +235,8 @@ impl BlockInfo {
 fn collect_block_infos<F: Function>(
     func: &F,
     intervals: &Vec<VirtualInterval>,
-    liveins: &TypedIxVec<BlockIx, SparseSet<Reg>>,
-    liveouts: &TypedIxVec<BlockIx, SparseSet<Reg>>,
+    liveins: &TypedIxVec<BlockIx, RegBitSet>,
+    liveouts: &TypedIxVec<BlockIx, RegBitSet>,
 ) -> Vec<BlockInfo> {
     // First, collect the first and last instructions of each block.
     let mut block_start_and_ends = Vec::with_capacity(2 * func.blocks().len());
@@ -319,8 +320,8 @@ fn collect_block_infos<F: Function>(
 #[inline(never)]
 fn resolve_moves_across_blocks<F: Function>(
     func: &F,
-    liveins: &TypedIxVec<BlockIx, SparseSet<Reg>>,
-    liveouts: &TypedIxVec<BlockIx, SparseSet<Reg>>,
+    liveins: &TypedIxVec<BlockIx, RegBitSet>,
+    liveouts: &TypedIxVec<BlockIx, RegBitSet>,
     intervals: &Vec<VirtualInterval>,
     scratches_by_rc: &[Option<RealReg>],
     spill_slot: &mut u32,
@@ -496,8 +497,8 @@ pub(crate) fn run<F: Function>(
     func: &F,
     reg_uses: &RegUses,
     intervals: &Vec<VirtualInterval>,
-    liveins: &TypedIxVec<BlockIx, SparseSet<Reg>>,
-    liveouts: &TypedIxVec<BlockIx, SparseSet<Reg>>,
+    liveins: &TypedIxVec<BlockIx, RegBitSet>,
+    liveouts: &TypedIxVec<BlockIx, RegBitSet>,
     spill_slot: &mut u32,
     scratches_by_rc: &[Option<RealReg>],
 ) -> Vec<InstToInsertAndExtPoint> {
