@@ -13,6 +13,7 @@ use crate::data_structures::{
     RegVecsAndBounds, SortedRangeFragIxs, SortedRangeFrags, SpillCost, TypedIxVec, VirtualRange,
     VirtualRangeIx, VirtualReg,
 };
+use crate::dense_set::{RegBitSet, RegSet};
 use crate::sparse_set::SparseSet;
 use crate::union_find::{ToFromU32, UnionFind};
 use crate::Function;
@@ -523,16 +524,16 @@ pub fn calc_def_and_use<F: Function>(
     rvb: &RegVecsAndBounds,
     univ: &RealRegUniverse,
 ) -> (
-    TypedIxVec<BlockIx, SparseSet<Reg>>,
-    TypedIxVec<BlockIx, SparseSet<Reg>>,
+    TypedIxVec<BlockIx, RegBitSet>,
+    TypedIxVec<BlockIx, RegBitSet>,
 ) {
     info!("    calc_def_and_use: begin");
     assert!(rvb.is_sanitized());
     let mut def_sets = TypedIxVec::new();
     let mut use_sets = TypedIxVec::new();
     for b in func.blocks() {
-        let mut def = SparseSet::empty();
-        let mut uce = SparseSet::empty();
+        let mut def: RegBitSet = RegSet::empty();
+        let mut uce: RegBitSet = RegSet::empty();
         for iix in func.block_insns(b) {
             let bounds_for_iix = &rvb.bounds[iix];
             // Add to `uce`, any registers for which the first event in this block
@@ -628,20 +629,20 @@ pub fn calc_def_and_use<F: Function>(
 #[inline(never)]
 pub fn calc_livein_and_liveout<F: Function>(
     func: &F,
-    def_sets_per_block: &TypedIxVec<BlockIx, SparseSet<Reg>>,
-    use_sets_per_block: &TypedIxVec<BlockIx, SparseSet<Reg>>,
+    def_sets_per_block: &TypedIxVec<BlockIx, RegBitSet>,
+    use_sets_per_block: &TypedIxVec<BlockIx, RegBitSet>,
     cfg_info: &CFGInfo,
     univ: &RealRegUniverse,
 ) -> (
-    TypedIxVec<BlockIx, SparseSet<Reg>>,
-    TypedIxVec<BlockIx, SparseSet<Reg>>,
+    TypedIxVec<BlockIx, RegBitSet>,
+    TypedIxVec<BlockIx, RegBitSet>,
 ) {
     info!("    calc_livein_and_liveout: begin");
     let num_blocks = func.blocks().len() as u32;
-    let empty = SparseSet::<Reg>::empty();
+    let empty: RegBitSet = RegSet::empty();
 
     let mut num_evals = 0;
-    let mut liveouts = TypedIxVec::<BlockIx, SparseSet<Reg>>::new();
+    let mut liveouts = TypedIxVec::<BlockIx, RegBitSet>::new();
     liveouts.resize(num_blocks, empty.clone());
 
     // Initialise the work queue so as to do a reverse preorder traversal
@@ -667,7 +668,7 @@ pub fn calc_livein_and_liveout<F: Function>(
         in_queue[i] = false;
 
         // Compute a new value for liveouts[block_ix]
-        let mut set = SparseSet::<Reg>::empty();
+        let mut set: RegBitSet = RegSet::empty();
         for block_j_ix in cfg_info.succ_map[block_ix].iter() {
             let mut live_in_j = liveouts[*block_j_ix].clone();
             live_in_j.remove(&def_sets_per_block[*block_j_ix]);
@@ -692,7 +693,7 @@ pub fn calc_livein_and_liveout<F: Function>(
 
     // The liveout values are done, but we need to compute the liveins
     // too.
-    let mut liveins = TypedIxVec::<BlockIx, SparseSet<Reg>>::new();
+    let mut liveins = TypedIxVec::<BlockIx, RegBitSet>::new();
     liveins.resize(num_blocks, empty.clone());
     for block_ix in BlockIx::new(0).dotdot(BlockIx::new(num_blocks)) {
         let mut live_in = liveouts[block_ix].clone();
@@ -909,8 +910,8 @@ fn get_range_frags_for_block<F: Function>(
     reg_universe: &RealRegUniverse,
     vreg_classes: &Vec</*vreg index,*/ RegClass>,
     bix: BlockIx,
-    livein: &SparseSet<Reg>,
-    liveout: &SparseSet<Reg>,
+    livein: &RegBitSet,
+    liveout: &RegBitSet,
     // Preallocated storage for use in this function.  They do not carry any useful information
     // in between calls here.
     visited: &mut Vec<u32>,
@@ -1141,8 +1142,8 @@ pub fn get_range_frags<F: Function>(
     func: &F,
     rvb: &RegVecsAndBounds,
     reg_universe: &RealRegUniverse,
-    livein_sets_per_block: &TypedIxVec<BlockIx, SparseSet<Reg>>,
-    liveout_sets_per_block: &TypedIxVec<BlockIx, SparseSet<Reg>>,
+    livein_sets_per_block: &TypedIxVec<BlockIx, RegBitSet>,
+    liveout_sets_per_block: &TypedIxVec<BlockIx, RegBitSet>,
 ) -> (
     Vec</*rreg index, then vreg index, */ SmallVec<[RangeFragIx; 8]>>,
     TypedIxVec<RangeFragIx, RangeFrag>,

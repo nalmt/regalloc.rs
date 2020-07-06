@@ -13,6 +13,8 @@ use crate::data_structures::{
     RealRegUniverse, RegClass, RegToRangesMaps, RegVecsAndBounds, TypedIxVec, VirtualRange,
     VirtualRangeIx, VirtualReg,
 };
+
+use crate::dense_set::{RegBitSet, RegSet};
 use crate::sparse_set::SparseSet;
 use crate::AlgorithmWithDefaults;
 use crate::Function;
@@ -181,7 +183,7 @@ pub fn run_analysis<F: Function>(
 
     // Verify livein set of entry block against liveins specified by function
     // (e.g., ABI params).
-    let func_liveins = SparseSet::from_vec(
+    let func_liveins = RegSet::from_vec(
         func.func_liveins()
             .to_vec()
             .into_iter()
@@ -193,7 +195,7 @@ pub fn run_analysis<F: Function>(
     }
 
     // Add function liveouts to every block ending in a return.
-    let func_liveouts = SparseSet::from_vec(
+    let func_liveouts = RegSet::from_vec(
         func.func_liveouts()
             .to_vec()
             .into_iter()
